@@ -33,6 +33,28 @@ impl TypeLayout {
         }
         layout_mask
     }
+
+    pub fn to_umask(&self) -> u128 {
+        let mut layout_mask = vec![false; self.size_in_bytes];
+        for data_bytes in self.data_chunks.iter() {
+            for layout_item in
+                layout_mask.iter_mut().skip(data_bytes.offset).take(data_bytes.size.bytes())
+            {
+                *layout_item = true;
+            }
+        }
+
+        let layout_mask_size = layout_mask.len();
+        assert!(layout_mask_size <= 128, "layout mask with size of {layout_mask_size} unsupported");
+        let mut layout = 0;
+        for (i, bit) in layout_mask.into_iter().enumerate() {
+            if bit {
+                layout |= 2u128.pow(i as u32);
+            }
+        }
+
+        layout
+    }
 }
 
 // Depending on whether the type is statically or dynamically sized,

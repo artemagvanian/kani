@@ -15,7 +15,7 @@ use lazy_static::lazy_static;
 use rustc_middle::ty::TyCtxt;
 use rustc_smir::rustc_internal;
 use stable_mir::mir::mono::Instance;
-use stable_mir::mir::{AggregateKind, Body, ConstOperand, Mutability, Operand, Place, Rvalue};
+use stable_mir::mir::{Body, ConstOperand, Mutability, Operand, Place, Rvalue};
 use stable_mir::ty::{
     FnDef, GenericArgKind, GenericArgs, MirConst, RigidTy, Ty, TyConst, TyKind, UintTy,
 };
@@ -161,7 +161,7 @@ impl UninitPass {
                 Ok(type_info) => type_info,
                 Err(_) => {
                     let reason = format!(
-                        "Kani currently doesn't support checking memory initialization for pointers to `{pointee_ty}.",
+                        "Kani currently doesn't support checking memory initialization for pointers to `{pointee_ty}`.",
                     );
                     try_mark_new_bb_as_skipped(&operation, body, skip_first);
                     self.unsupported_check(tcx, body, source, operation.position(), &reason);
@@ -212,7 +212,7 @@ impl UninitPass {
                     ]),
                 )
                 .unwrap();
-                let layout_operand = mk_layout_operand(body, source, operation.position(), layout);
+                let layout_operand = mk_layout_operand(body, source, layout);
                 try_mark_new_bb_as_skipped(&operation, body, skip_first);
                 body.add_call(
                     &shadow_memory_get_instance,
@@ -246,8 +246,7 @@ impl UninitPass {
                     ]),
                 )
                 .unwrap();
-                let layout_operand =
-                    mk_layout_operand(body, source, operation.position(), element_layout);
+                let layout_operand = mk_layout_operand(body, source, element_layout);
                 try_mark_new_bb_as_skipped(&operation, body, skip_first);
                 body.add_call(
                     &shadow_memory_get_instance,
@@ -304,7 +303,7 @@ impl UninitPass {
                     ]),
                 )
                 .unwrap();
-                let layout_operand = mk_layout_operand(body, source, operation.position(), layout);
+                let layout_operand = mk_layout_operand(body, source, layout);
                 try_mark_new_bb_as_skipped(&operation, body, skip_first);
                 body.add_call(
                     &shadow_memory_set_instance,
@@ -347,8 +346,7 @@ impl UninitPass {
                     ]),
                 )
                 .unwrap();
-                let layout_operand =
-                    mk_layout_operand(body, source, operation.position(), element_layout);
+                let layout_operand = mk_layout_operand(body, source, element_layout);
                 try_mark_new_bb_as_skipped(&operation, body, skip_first);
                 body.add_call(
                     &shadow_memory_set_instance,
@@ -393,29 +391,12 @@ impl UninitPass {
 pub fn mk_layout_operand(
     body: &mut MutableBody,
     source: &mut SourceInstruction,
-    position: InsertPosition,
     layout: &TypeLayout,
 ) -> Operand {
-    Operand::Move(Place {
-        local: body.new_assignment(
-            Rvalue::Aggregate(
-                AggregateKind::Array(Ty::bool_ty()),
-                layout
-                    .to_byte_mask()
-                    .iter()
-                    .map(|byte| {
-                        Operand::Constant(ConstOperand {
-                            span: source.span(body.blocks()),
-                            user_ty: None,
-                            const_: MirConst::from_bool(*byte),
-                        })
-                    })
-                    .collect(),
-            ),
-            source,
-            position,
-        ),
-        projection: vec![],
+    Operand::Constant(ConstOperand {
+        span: source.span(body.blocks()),
+        user_ty: None,
+        const_: MirConst::try_from_uint(layout.to_umask() as u128, UintTy::U128).unwrap(),
     })
 }
 

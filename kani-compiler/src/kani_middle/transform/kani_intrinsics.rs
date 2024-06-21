@@ -196,7 +196,6 @@ impl IntrinsicGeneratorPass {
                         let layout_operand = mk_layout_operand(
                             &mut new_body,
                             &mut terminator,
-                            InsertPosition::Before,
                             layout,
                         );
                         new_body.add_call(
@@ -228,7 +227,6 @@ impl IntrinsicGeneratorPass {
                         let layout_operand = mk_layout_operand(
                             &mut new_body,
                             &mut terminator,
-                            InsertPosition::Before,
                             element_layout,
                         );
                         new_body.add_call(

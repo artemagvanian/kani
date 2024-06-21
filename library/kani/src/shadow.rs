@@ -82,116 +82,152 @@ impl<T: Copy> ShadowMem<T> {
     }
 }
 
-/// Bytewise mask, representing which bytes of a type are data and which are padding.
-/// For example, for a type like this:
-/// ```
-/// #[repr(C)]
-/// struct Foo {
-///     a: u16,
-///     b: u8,
-/// }
-/// ```
-/// the layout would be [true, true, true, false];
-type Layout<const N: usize> = [bool; N];
+#[allow(dead_code)]
+mod meminit {
+    const MAX_NUM_OBJECTS: usize = 1024;
+    const MAX_OBJECT_SIZE: usize = 128;
 
-/// Global shadow memory object for tracking memory initialization.
-#[rustc_diagnostic_item = "KaniMemInitSM"]
-static mut __KANI_MEM_INIT_SM: ShadowMem<bool> = ShadowMem::new(false);
+    const MAX_NUM_OBJECTS_ASSERT_MSG: &str = "The number of objects exceeds the maximum number supported by Kani's shadow memory model (1024)";
+    const MAX_OBJECT_SIZE_ASSERT_MSG: &str =
+        "The object size exceeds the maximum size supported by Kani's shadow memory model (128)";
 
-/// Get initialization state of `len` items laid out according to the `layout` starting at address `ptr`.
-#[rustc_diagnostic_item = "KaniMemInitSMGetInner"]
-fn __kani_mem_init_sm_get_inner<const N: usize>(
-    ptr: *const (),
-    layout: Layout<N>,
-    len: usize,
-) -> bool {
-    let mut count: usize = 0;
-    while count < len {
-        let mut offset: usize = 0;
-        while offset < N {
-            unsafe {
-                if layout[offset]
-                    && !__KANI_MEM_INIT_SM.get((ptr as *const u8).add(count * N + offset))
-                {
-                    return false;
-                }
-                offset += 1;
+    pub struct MemInit {
+        mem: [u128; MAX_NUM_OBJECTS],
+    }
+
+    impl MemInit {
+        pub const fn new() -> Self {
+            Self { mem: [0; MAX_NUM_OBJECTS] }
+        }
+
+        pub fn get<const SIZE: usize>(&self, ptr: *const u8, layout: u128) -> bool {
+            if SIZE == 0 {
+                return true;
+            }
+            let obj = crate::mem::pointer_object(ptr);
+            let offset = crate::mem::pointer_offset(ptr);
+            crate::assert(obj < MAX_NUM_OBJECTS, MAX_NUM_OBJECTS_ASSERT_MSG);
+            crate::assert(offset + SIZE < MAX_OBJECT_SIZE, MAX_OBJECT_SIZE_ASSERT_MSG);
+            crate::assert(
+                obj == crate::mem::pointer_object(unsafe { ptr.add(SIZE) }),
+                "cannot set shadow memory for multiple objects at once",
+            );
+            let bit_mask = ((1u128 << SIZE) - 1) << offset;
+            ((self.mem[obj] | !bit_mask) | !(layout << offset)) == u128::MAX
+        }
+
+        pub fn set<const SIZE: usize>(&mut self, ptr: *const u8, layout: u128, val: bool) {
+            if SIZE == 0 {
+                return;
+            }
+            let obj = crate::mem::pointer_object(ptr);
+            let offset = crate::mem::pointer_offset(ptr);
+            crate::assert(obj < MAX_NUM_OBJECTS, MAX_NUM_OBJECTS_ASSERT_MSG);
+            crate::assert(offset + SIZE < MAX_OBJECT_SIZE, MAX_OBJECT_SIZE_ASSERT_MSG);
+            crate::assert(
+                obj == crate::mem::pointer_object(unsafe { ptr.add(SIZE) }),
+                "cannot set shadow memory for multiple objects at once",
+            );
+            let bit_mask = ((1u128 << SIZE) - 1) << offset;
+            self.mem[obj] &= !bit_mask;
+            if val {
+                self.mem[obj] |= layout << offset;
             }
         }
-        count += 1;
     }
-    true
-}
 
-/// Set initialization state to `value` for `len` items laid out according to the `layout` starting at address `ptr`.
-#[rustc_diagnostic_item = "KaniMemInitSMSetInner"]
-fn __kani_mem_init_sm_set_inner<const N: usize>(
-    ptr: *const (),
-    layout: Layout<N>,
-    len: usize,
-    value: bool,
-) {
-    let mut count: usize = 0;
-    while count < len {
-        let mut offset: usize = 0;
-        while offset < N {
-            unsafe {
-                __KANI_MEM_INIT_SM
-                    .set((ptr as *const u8).add(count * N + offset), value && layout[offset]);
+    /// Global shadow memory object for tracking memory initialization.
+    #[rustc_diagnostic_item = "KaniMemInitSM"]
+    static mut __KANI_MEM_INIT_SM: MemInit = MemInit::new();
+
+    /// Get initialization state of `len` items laid out according to the `layout` starting at address `ptr`.
+    #[rustc_diagnostic_item = "KaniMemInitSMGetInner"]
+    fn __kani_mem_init_sm_get_inner<const SIZE: usize>(
+        ptr: *const (),
+        layout: u128,
+        len: usize,
+    ) -> bool {
+        let mut count: usize = 0;
+        while count < len {
+            if unsafe {
+                !__KANI_MEM_INIT_SM.get::<SIZE>((ptr as *const u8).add(count * SIZE), layout)
+            } {
+                return false;
             }
-            offset += 1;
+            count += 1;
         }
-        count += 1;
+        true
     }
-}
 
-/// Get initialization state of `len` items laid out according to the `layout` starting at address `ptr`.
-#[rustc_diagnostic_item = "KaniMemInitSMGet"]
-fn __kani_mem_init_sm_get<const N: usize, T>(ptr: *const T, layout: Layout<N>, len: usize) -> bool {
-    let (ptr, _) = ptr.to_raw_parts();
-    __kani_mem_init_sm_get_inner(ptr, layout, len)
-}
+    /// Set initialization state to `value` for `len` items laid out according to the `layout` starting at address `ptr`.
+    #[rustc_diagnostic_item = "KaniMemInitSMSetInner"]
+    fn __kani_mem_init_sm_set_inner<const SIZE: usize>(
+        ptr: *const (),
+        layout: u128,
+        len: usize,
+        value: bool,
+    ) {
+        let mut count: usize = 0;
+        while count < len {
+            unsafe {
+                __KANI_MEM_INIT_SM.set::<SIZE>((ptr as *const u8).add(count * SIZE), layout, value);
+            }
+            count += 1;
+        }
+    }
 
-/// Set initialization state to `value` for `len` items laid out according to the `layout` starting at address `ptr`.
-#[rustc_diagnostic_item = "KaniMemInitSMSet"]
-fn __kani_mem_init_sm_set<const N: usize, T>(
-    ptr: *const T,
-    layout: Layout<N>,
-    len: usize,
-    value: bool,
-) {
-    let (ptr, _) = ptr.to_raw_parts();
-    __kani_mem_init_sm_set_inner(ptr, layout, len, value);
-}
+    /// Get initialization state of `len` items laid out according to the `layout` starting at address `ptr`.
+    #[rustc_diagnostic_item = "KaniMemInitSMGet"]
+    fn __kani_mem_init_sm_get<const SIZE: usize, T>(
+        ptr: *const T,
+        layout: u128,
+        len: usize,
+    ) -> bool {
+        let (ptr, _) = ptr.to_raw_parts();
+        __kani_mem_init_sm_get_inner::<SIZE>(ptr, layout, len)
+    }
 
-/// Get initialization state of the slice, items of which are laid out according to the `layout` starting at address `ptr`.
-#[rustc_diagnostic_item = "KaniMemInitSMGetSlice"]
-fn __kani_mem_init_sm_get_slice<const N: usize, T>(ptr: *const [T], layout: Layout<N>) -> bool {
-    let (ptr, len) = ptr.to_raw_parts();
-    __kani_mem_init_sm_get_inner(ptr, layout, len)
-}
+    /// Set initialization state to `value` for `len` items laid out according to the `layout` starting at address `ptr`.
+    #[rustc_diagnostic_item = "KaniMemInitSMSet"]
+    fn __kani_mem_init_sm_set<const SIZE: usize, T>(
+        ptr: *const T,
+        layout: u128,
+        len: usize,
+        value: bool,
+    ) {
+        let (ptr, _) = ptr.to_raw_parts();
+        __kani_mem_init_sm_set_inner::<SIZE>(ptr, layout, len, value);
+    }
 
-/// Set initialization state of the slice, items of which are laid out according to the `layout` starting at address `ptr` to `value`.
-#[rustc_diagnostic_item = "KaniMemInitSMSetSlice"]
-fn __kani_mem_init_sm_set_slice<const N: usize, T>(
-    ptr: *const [T],
-    layout: Layout<N>,
-    value: bool,
-) {
-    let (ptr, len) = ptr.to_raw_parts();
-    __kani_mem_init_sm_set_inner(ptr, layout, len, value);
-}
+    /// Get initialization state of the slice, items of which are laid out according to the `layout` starting at address `ptr`.
+    #[rustc_diagnostic_item = "KaniMemInitSMGetSlice"]
+    fn __kani_mem_init_sm_get_slice<const SIZE: usize, T>(ptr: *const [T], layout: u128) -> bool {
+        let (ptr, len) = ptr.to_raw_parts();
+        __kani_mem_init_sm_get_inner::<SIZE>(ptr, layout, len)
+    }
 
-/// Get initialization state of the string slice, items of which are laid out according to the `layout` starting at address `ptr`.
-#[rustc_diagnostic_item = "KaniMemInitSMGetStr"]
-fn __kani_mem_init_sm_get_str<const N: usize>(ptr: *const str, layout: Layout<N>) -> bool {
-    let (ptr, len) = ptr.to_raw_parts();
-    __kani_mem_init_sm_get_inner(ptr, layout, len)
-}
+    /// Set initialization state of the slice, items of which are laid out according to the `layout` starting at address `ptr` to `value`.
+    #[rustc_diagnostic_item = "KaniMemInitSMSetSlice"]
+    fn __kani_mem_init_sm_set_slice<const SIZE: usize, T>(
+        ptr: *const [T],
+        layout: u128,
+        value: bool,
+    ) {
+        let (ptr, len) = ptr.to_raw_parts();
+        __kani_mem_init_sm_set_inner::<SIZE>(ptr, layout, len, value);
+    }
 
-/// Set initialization state of the string slice, items of which are laid out according to the `layout` starting at address `ptr` to `value`.
-#[rustc_diagnostic_item = "KaniMemInitSMSetStr"]
-fn __kani_mem_init_sm_set_str<const N: usize>(ptr: *const str, layout: Layout<N>, value: bool) {
-    let (ptr, len) = ptr.to_raw_parts();
-    __kani_mem_init_sm_set_inner(ptr, layout, len, value);
+    /// Get initialization state of the string slice, items of which are laid out according to the `layout` starting at address `ptr`.
+    #[rustc_diagnostic_item = "KaniMemInitSMGetStr"]
+    fn __kani_mem_init_sm_get_str<const SIZE: usize>(ptr: *const str, layout: u128) -> bool {
+        let (ptr, len) = ptr.to_raw_parts();
+        __kani_mem_init_sm_get_inner::<SIZE>(ptr, layout, len)
+    }
+
+    /// Set initialization state of the string slice, items of which are laid out according to the `layout` starting at address `ptr` to `value`.
+    #[rustc_diagnostic_item = "KaniMemInitSMSetStr"]
+    fn __kani_mem_init_sm_set_str<const SIZE: usize>(ptr: *const str, layout: u128, value: bool) {
+        let (ptr, len) = ptr.to_raw_parts();
+        __kani_mem_init_sm_set_inner::<SIZE>(ptr, layout, len, value);
+    }
 }
