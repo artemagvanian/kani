@@ -84,54 +84,64 @@ impl<T: Copy> ShadowMem<T> {
 
 #[allow(dead_code)]
 mod meminit {
-    const MAX_NUM_OBJECTS: usize = 1024;
-    const MAX_OBJECT_SIZE: usize = 128;
-
-    const MAX_NUM_OBJECTS_ASSERT_MSG: &str = "The number of objects exceeds the maximum number supported by Kani's shadow memory model (1024)";
-    const MAX_OBJECT_SIZE_ASSERT_MSG: &str =
-        "The object size exceeds the maximum size supported by Kani's shadow memory model (128)";
+    use crate::any;
 
     pub struct MemInit {
-        mem: [u128; MAX_NUM_OBJECTS],
+        pub curr: usize,
+        pub layout: u128,
     }
 
     impl MemInit {
         pub const fn new() -> Self {
-            Self { mem: [0; MAX_NUM_OBJECTS] }
+            Self { curr: 0, layout: 0 }
         }
 
-        pub fn get<const SIZE: usize>(&self, ptr: *const u8, layout: u128) -> bool {
+        pub fn get<const SIZE: usize>(&mut self, ptr: *const u8, layout: u128) -> bool {
             if SIZE == 0 {
                 return true;
             }
+
             let obj = crate::mem::pointer_object(ptr);
             let offset = crate::mem::pointer_offset(ptr);
-            crate::assert(obj < MAX_NUM_OBJECTS, MAX_NUM_OBJECTS_ASSERT_MSG);
-            crate::assert(offset + SIZE < MAX_OBJECT_SIZE, MAX_OBJECT_SIZE_ASSERT_MSG);
+            crate::assert(
+                offset + SIZE < 128,
+                "Layout tag is a u128, so cannot represent larger layouts",
+            );
             crate::assert(
                 obj == crate::mem::pointer_object(unsafe { ptr.add(SIZE) }),
                 "cannot set shadow memory for multiple objects at once",
             );
-            let bit_mask = ((1u128 << SIZE) - 1) << offset;
-            ((self.mem[obj] | !bit_mask) | !(layout << offset)) == u128::MAX
+
+            if self.curr == obj {
+                let bit_mask = ((1u128 << SIZE) - 1) << offset;
+                ((self.layout | !bit_mask) | !(layout << offset)) == u128::MAX
+            } else {
+                true
+            }
         }
 
         pub fn set<const SIZE: usize>(&mut self, ptr: *const u8, layout: u128, val: bool) {
             if SIZE == 0 {
                 return;
             }
+
             let obj = crate::mem::pointer_object(ptr);
             let offset = crate::mem::pointer_offset(ptr);
-            crate::assert(obj < MAX_NUM_OBJECTS, MAX_NUM_OBJECTS_ASSERT_MSG);
-            crate::assert(offset + SIZE < MAX_OBJECT_SIZE, MAX_OBJECT_SIZE_ASSERT_MSG);
+            crate::assert(
+                offset + SIZE < 128,
+                "Layout tag is a u128, so cannot represent larger layouts",
+            );
             crate::assert(
                 obj == crate::mem::pointer_object(unsafe { ptr.add(SIZE) }),
                 "cannot set shadow memory for multiple objects at once",
             );
-            let bit_mask = ((1u128 << SIZE) - 1) << offset;
-            self.mem[obj] &= !bit_mask;
-            if val {
-                self.mem[obj] |= layout << offset;
+
+            if self.curr == obj {
+                let bit_mask = ((1u128 << SIZE) - 1) << offset;
+                self.layout &= !bit_mask;
+                if val {
+                    self.layout |= layout << offset;
+                }
             }
         }
     }
@@ -139,6 +149,13 @@ mod meminit {
     /// Global shadow memory object for tracking memory initialization.
     #[rustc_diagnostic_item = "KaniMemInitSM"]
     static mut __KANI_MEM_INIT_SM: MemInit = MemInit::new();
+
+    #[rustc_diagnostic_item = "KaniMemInitSMInit"]
+    pub fn __kani_mem_init_sm_init() {
+        unsafe {
+            __KANI_MEM_INIT_SM.curr = any();
+        }
+    }
 
     /// Get initialization state of `len` items laid out according to the `layout` starting at address `ptr`.
     #[rustc_diagnostic_item = "KaniMemInitSMGetInner"]

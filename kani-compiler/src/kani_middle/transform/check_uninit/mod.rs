@@ -86,6 +86,51 @@ impl TransformPass for UninitPass {
         let mut new_body = MutableBody::from(body);
         let orig_len = new_body.blocks().len();
 
+        let harness_identifiers = &[
+            &[
+                rustc_span::symbol::Symbol::intern("kanitool"),
+                rustc_span::symbol::Symbol::intern("proof_for_contract"),
+            ],
+            &[
+                rustc_span::symbol::Symbol::intern("kanitool"),
+                rustc_span::symbol::Symbol::intern("proof"),
+            ],
+        ];
+
+        if harness_identifiers.iter().any(|attr_path| {
+            tcx.has_attrs_with_path(
+                rustc_internal::internal(tcx, instance.def.def_id()),
+                *attr_path,
+            )
+        }) {
+            let mut source = if new_body.blocks()[0].statements.len() != 0 {
+                SourceInstruction::Statement { idx: 0, bb: 0 }
+            } else {
+                SourceInstruction::Terminator { bb: 0 }
+            };
+
+            let ret_place = Place {
+                local: new_body.new_local(
+                    Ty::new_tuple(&[]),
+                    source.span(new_body.blocks()),
+                    Mutability::Not,
+                ),
+                projection: vec![],
+            };
+            let shadow_memory_init = Instance::resolve(
+                get_kani_sm_function(tcx, "KaniMemInitSMInit"),
+                &GenericArgs(vec![]),
+            )
+            .unwrap();
+            new_body.add_call(
+                &shadow_memory_init,
+                &mut source,
+                InsertPosition::Before,
+                vec![],
+                ret_place.clone(),
+            );
+        }
+
         // Set of basic block indices for which analyzing first statement should be skipped.
         //
         // This is necessary because some checks are inserted before the source instruction, which, in
