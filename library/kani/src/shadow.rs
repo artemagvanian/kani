@@ -96,48 +96,40 @@ mod meminit {
             Self { curr: 0, layout: 0 }
         }
 
-        pub fn get<const SIZE: usize>(&mut self, ptr: *const u8, layout: u128) -> bool {
-            if SIZE == 0 {
-                return true;
-            }
-
+        pub fn get(&mut self, ptr: *const u8, layout: u128, size: usize) -> bool {
             let obj = crate::mem::pointer_object(ptr);
             let offset = crate::mem::pointer_offset(ptr);
             crate::assert(
-                offset + SIZE < 128,
+                offset + size < 128,
                 "Layout tag is a u128, so cannot represent larger layouts",
             );
             crate::assert(
-                obj == crate::mem::pointer_object(unsafe { ptr.add(SIZE - 1) }),
+                obj == crate::mem::pointer_object(unsafe { ptr.add(size - 1) }),
                 "cannot set shadow memory for multiple objects at once",
             );
 
             if self.curr == obj {
-                let bit_mask = ((1u128 << SIZE) - 1) << offset;
+                let bit_mask = ((1u128 << size) - 1) << offset;
                 ((self.layout | !bit_mask) | !(layout << offset)) == u128::MAX
             } else {
                 true
             }
         }
 
-        pub fn set<const SIZE: usize>(&mut self, ptr: *const u8, layout: u128, val: bool) {
-            if SIZE == 0 {
-                return;
-            }
-
+        pub fn set(&mut self, ptr: *const u8, layout: u128, size: usize, val: bool) {
             let obj = crate::mem::pointer_object(ptr);
             let offset = crate::mem::pointer_offset(ptr);
             crate::assert(
-                offset + SIZE < 128,
+                offset + size < 128,
                 "Layout tag is a u128, so cannot represent larger layouts",
             );
             crate::assert(
-                obj == crate::mem::pointer_object(unsafe { ptr.add(SIZE - 1) }),
+                obj == crate::mem::pointer_object(unsafe { ptr.add(size - 1) }),
                 "cannot set shadow memory for multiple objects at once",
             );
 
             if self.curr == obj {
-                let bit_mask = ((1u128 << SIZE) - 1) << offset;
+                let bit_mask = ((1u128 << size) - 1) << offset;
                 self.layout &= !bit_mask;
                 if val {
                     self.layout |= layout << offset;
@@ -165,10 +157,14 @@ mod meminit {
         layout: u128,
         len: usize,
     ) -> bool {
+        if SIZE == 0 {
+            return true;
+        }
         unsafe {
-            let count: usize = kani::any();
-            kani::assume(count < len);
-            __KANI_MEM_INIT_SM.get::<SIZE>((ptr as *const u8).add(count * SIZE), layout)
+            // Geometric series expansion.
+            let repeated_layout: u128 =
+                layout * (((1u128 << (SIZE * len)) - 1u128) / ((1u128 << SIZE) - 1u128));
+            __KANI_MEM_INIT_SM.get(ptr as *const u8, repeated_layout, SIZE * len)
         }
     }
 
@@ -180,12 +176,14 @@ mod meminit {
         len: usize,
         value: bool,
     ) {
-        let mut count: usize = 0;
-        while count < len {
+        if SIZE == 0 {
+            return;
+        }
         unsafe {
-            __KANI_MEM_INIT_SM.set::<SIZE>((ptr as *const u8).add(count * SIZE), layout, value);
-            }
-            count += 1;
+            // Geometric series expansion.
+            let repeated_layout: u128 =
+                layout * (((1u128 << (SIZE * len)) - 1u128) / ((1u128 << SIZE) - 1u128));
+            __KANI_MEM_INIT_SM.set(ptr as *const u8, repeated_layout, SIZE, value);
         }
     }
 
