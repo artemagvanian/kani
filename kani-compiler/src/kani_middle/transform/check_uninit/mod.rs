@@ -31,7 +31,8 @@ mod uninit_visitor;
 pub use ty_layout::{PointeeInfo, PointeeLayout, TypeLayout};
 use uninit_visitor::{CheckUninitVisitor, InitRelevantInstruction, SourceOp};
 
-const SKIPPED_DIAGNOSTIC_ITEMS: &[&str] = &["KaniMemInitSMGetInner", "KaniMemInitSMSetInner"];
+const SKIPPED_DIAGNOSTIC_ITEMS: &[&str] =
+    &["KaniMemInitSMGetInner", "KaniMemInitSMSetInner", "KaniMemInitSMInit"];
 
 /// Retrieve a function definition by diagnostic string, caching the result.
 pub fn get_kani_sm_function(tcx: TyCtxt, diagnostic: &'static str) -> FnDef {

@@ -84,7 +84,7 @@ impl<T: Copy> ShadowMem<T> {
 
 #[allow(dead_code)]
 mod meminit {
-    use crate::any;
+    use crate as kani;
 
     pub struct MemInit {
         pub curr: usize,
@@ -108,7 +108,7 @@ mod meminit {
                 "Layout tag is a u128, so cannot represent larger layouts",
             );
             crate::assert(
-                obj == crate::mem::pointer_object(unsafe { ptr.add(SIZE) }),
+                obj == crate::mem::pointer_object(unsafe { ptr.add(SIZE - 1) }),
                 "cannot set shadow memory for multiple objects at once",
             );
 
@@ -132,7 +132,7 @@ mod meminit {
                 "Layout tag is a u128, so cannot represent larger layouts",
             );
             crate::assert(
-                obj == crate::mem::pointer_object(unsafe { ptr.add(SIZE) }),
+                obj == crate::mem::pointer_object(unsafe { ptr.add(SIZE - 1) }),
                 "cannot set shadow memory for multiple objects at once",
             );
 
@@ -153,7 +153,8 @@ mod meminit {
     #[rustc_diagnostic_item = "KaniMemInitSMInit"]
     pub fn __kani_mem_init_sm_init() {
         unsafe {
-            __KANI_MEM_INIT_SM.curr = any();
+            __KANI_MEM_INIT_SM.curr = kani::any();
+            __KANI_MEM_INIT_SM.layout = 0;
         }
     }
 
@@ -164,16 +165,11 @@ mod meminit {
         layout: u128,
         len: usize,
     ) -> bool {
-        let mut count: usize = 0;
-        while count < len {
-            if unsafe {
-                !__KANI_MEM_INIT_SM.get::<SIZE>((ptr as *const u8).add(count * SIZE), layout)
-            } {
-                return false;
-            }
-            count += 1;
+        unsafe {
+            let count: usize = kani::any();
+            kani::assume(count < len);
+            __KANI_MEM_INIT_SM.get::<SIZE>((ptr as *const u8).add(count * SIZE), layout)
         }
-        true
     }
 
     /// Set initialization state to `value` for `len` items laid out according to the `layout` starting at address `ptr`.
@@ -186,8 +182,8 @@ mod meminit {
     ) {
         let mut count: usize = 0;
         while count < len {
-            unsafe {
-                __KANI_MEM_INIT_SM.set::<SIZE>((ptr as *const u8).add(count * SIZE), layout, value);
+        unsafe {
+            __KANI_MEM_INIT_SM.set::<SIZE>((ptr as *const u8).add(count * SIZE), layout, value);
             }
             count += 1;
         }
