@@ -86,31 +86,26 @@ impl<T: Copy> ShadowMem<T> {
 mod meminit {
     use crate as kani;
 
-    pub struct MemInit {
-        pub curr: usize,
-        pub layout: u128,
+    pub struct MemInitState {
+        pub tracked_object: usize,
+        pub tracked_bit: usize,
+        pub value: bool,
     }
 
-    impl MemInit {
+    impl MemInitState {
         pub const fn new() -> Self {
-            Self { curr: 0, layout: 0 }
+            Self { tracked_object: 0, tracked_bit: 0, value: false }
         }
 
         pub fn get(&mut self, ptr: *const u8, layout: u128, size: usize) -> bool {
             let obj = crate::mem::pointer_object(ptr);
             let offset = crate::mem::pointer_offset(ptr);
-            crate::assert(
-                offset + size < 128,
-                "Layout tag is a u128, so cannot represent larger layouts",
-            );
-            crate::assert(
-                obj == crate::mem::pointer_object(unsafe { ptr.add(size - 1) }),
-                "cannot set shadow memory for multiple objects at once",
-            );
-
-            if self.curr == obj {
-                let bit_mask = ((1u128 << size) - 1) << offset;
-                ((self.layout | !bit_mask) | !(layout << offset)) == u128::MAX
+            if self.tracked_object == obj
+                && self.tracked_bit >= offset
+                && self.tracked_bit < offset + size
+                && ((layout << offset) >> self.tracked_bit) & 1 == 1
+            {
+                self.value
             } else {
                 true
             }
@@ -119,34 +114,27 @@ mod meminit {
         pub fn set(&mut self, ptr: *const u8, layout: u128, size: usize, val: bool) {
             let obj = crate::mem::pointer_object(ptr);
             let offset = crate::mem::pointer_offset(ptr);
-            crate::assert(
-                offset + size < 128,
-                "Layout tag is a u128, so cannot represent larger layouts",
-            );
-            crate::assert(
-                obj == crate::mem::pointer_object(unsafe { ptr.add(size - 1) }),
-                "cannot set shadow memory for multiple objects at once",
-            );
 
-            if self.curr == obj {
-                let bit_mask = ((1u128 << size) - 1) << offset;
-                self.layout &= !bit_mask;
-                if val {
-                    self.layout |= layout << offset;
-                }
+            if self.tracked_object == obj
+                && self.tracked_bit >= offset
+                && self.tracked_bit < offset + size
+                && ((layout << offset) >> self.tracked_bit) & 1 == 1
+            {
+                self.value = val;
             }
         }
     }
 
     /// Global shadow memory object for tracking memory initialization.
     #[rustc_diagnostic_item = "KaniMemInitSM"]
-    static mut __KANI_MEM_INIT_SM: MemInit = MemInit::new();
+    static mut __KANI_MEM_INIT_SM: MemInitState = MemInitState::new();
 
     #[rustc_diagnostic_item = "KaniMemInitSMInit"]
     pub fn __kani_mem_init_sm_init() {
         unsafe {
-            __KANI_MEM_INIT_SM.curr = kani::any();
-            __KANI_MEM_INIT_SM.layout = 0;
+            __KANI_MEM_INIT_SM.tracked_object = kani::any();
+            __KANI_MEM_INIT_SM.tracked_bit = kani::any();
+            __KANI_MEM_INIT_SM.value = false;
         }
     }
 
@@ -183,7 +171,7 @@ mod meminit {
             // Geometric series expansion.
             let repeated_layout: u128 =
                 layout * (((1u128 << (SIZE * len)) - 1u128) / ((1u128 << SIZE) - 1u128));
-            __KANI_MEM_INIT_SM.set(ptr as *const u8, repeated_layout, SIZE, value);
+            __KANI_MEM_INIT_SM.set(ptr as *const u8, repeated_layout, SIZE * len, value);
         }
     }
 
