@@ -417,6 +417,13 @@ impl SourceInstruction {
             SourceInstruction::Terminator { bb } => blocks[bb].terminator.span,
         }
     }
+
+    pub fn is_terminator(&self) -> bool {
+        match self {
+            SourceInstruction::Statement { .. } => false,
+            SourceInstruction::Terminator { .. } => true,
+        }
+    }
 }
 
 fn find_instance(tcx: TyCtxt, diagnostic: &str) -> Option<Instance> {

@@ -23,7 +23,7 @@ use stable_mir::mir::{
 };
 use stable_mir::target::MachineInfo;
 use stable_mir::ty::{FnDef, MirConst, RigidTy, Ty, TyKind, UintTy};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use strum_macros::AsRefStr;
 use tracing::trace;
@@ -185,6 +185,8 @@ impl IntrinsicGeneratorPass {
             return new_body.into();
         }
 
+        let mut skip_first = HashSet::new();
+
         // The first argument type.
         let arg_ty = new_body.locals()[1].ty;
         let TyKind::RigidTy(RigidTy::RawPtr(target_ty, _)) = arg_ty.kind() else { unreachable!() };
@@ -211,6 +213,7 @@ impl IntrinsicGeneratorPass {
                             &mut terminator,
                             InsertPosition::Before,
                             &layout,
+                            &mut skip_first,
                         );
                         new_body.add_call(
                             &is_ptr_initialized_instance,
@@ -245,6 +248,7 @@ impl IntrinsicGeneratorPass {
                             &mut terminator,
                             InsertPosition::Before,
                             &element_layout,
+                            &mut skip_first,
                         );
                         new_body.add_call(
                             &is_ptr_initialized_instance,

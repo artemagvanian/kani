@@ -167,16 +167,17 @@ impl UninitPass {
         skip_first: &mut HashSet<usize>,
     ) {
         if let MemoryInitOp::Unsupported { reason } = &operation {
-            collect_skipped(&operation, body, skip_first);
-            self.unsupported_check(tcx, body, source, operation.position(), reason);
+            self.unsupported_check(tcx, body, source, operation.position(), reason, skip_first);
             return;
         };
 
         let pointee_ty_info = {
-            let ptr_operand = operation.mk_operand(body, source);
+            let ptr_operand = operation.mk_operand(body, source, skip_first);
             let ptr_operand_ty = ptr_operand.ty(body.locals()).unwrap();
-            let pointee_ty = match ptr_operand_ty.kind() {
-                TyKind::RigidTy(RigidTy::RawPtr(pointee_ty, _)) => pointee_ty,
+            let pointee_ty = match ptr_operand_ty.kind().rigid().unwrap() {
+                RigidTy::RawPtr(pointee_ty, _) | RigidTy::Ref(_, pointee_ty, _) => {
+                    pointee_ty.clone()
+                }
                 _ => {
                     unreachable!(
                         "Should only build checks for raw pointers, `{ptr_operand_ty}` encountered."
@@ -189,15 +190,21 @@ impl UninitPass {
                     let reason = format!(
                         "Kani currently doesn't support checking memory initialization for pointers to `{pointee_ty}.",
                     );
-                    collect_skipped(&operation, body, skip_first);
-                    self.unsupported_check(tcx, body, source, operation.position(), &reason);
+                    self.unsupported_check(
+                        tcx,
+                        body,
+                        source,
+                        operation.position(),
+                        &reason,
+                        skip_first,
+                    );
                     return;
                 }
             }
         };
 
         match operation {
-            MemoryInitOp::Check { .. } => {
+            MemoryInitOp::Check { .. } | MemoryInitOp::CheckRef { .. } => {
                 self.build_get_and_check(tcx, body, source, operation, pointee_ty_info, skip_first)
             }
             MemoryInitOp::Set { .. } | MemoryInitOp::SetRef { .. } => {
@@ -221,10 +228,10 @@ impl UninitPass {
         skip_first: &mut HashSet<usize>,
     ) {
         let ret_place = Place {
-            local: body.new_local(Ty::bool_ty(), source.span(body.blocks()), Mutability::Not),
+            local: body.new_local(Ty::new_tuple(&[]), source.span(body.blocks()), Mutability::Not),
             projection: vec![],
         };
-        let ptr_operand = operation.mk_operand(body, source);
+        let ptr_operand = operation.mk_operand(body, source, skip_first);
         match pointee_info.layout() {
             PointeeLayout::Sized { layout } => {
                 let is_ptr_initialized_instance = resolve_mem_init_fn(
@@ -232,8 +239,9 @@ impl UninitPass {
                     layout.len(),
                     *pointee_info.ty(),
                 );
-                let layout_operand = mk_layout_operand(body, source, operation.position(), &layout);
-                collect_skipped(&operation, body, skip_first);
+                let layout_operand =
+                    mk_layout_operand(body, source, operation.position(), &layout, skip_first);
+                collect_skipped(operation.position(), source, body, skip_first);
                 body.add_call(
                     &is_ptr_initialized_instance,
                     source,
@@ -258,9 +266,14 @@ impl UninitPass {
                     element_layout.len(),
                     slicee_ty,
                 );
-                let layout_operand =
-                    mk_layout_operand(body, source, operation.position(), &element_layout);
-                collect_skipped(&operation, body, skip_first);
+                let layout_operand = mk_layout_operand(
+                    body,
+                    source,
+                    operation.position(),
+                    &element_layout,
+                    skip_first,
+                );
+                collect_skipped(operation.position(), source, body, skip_first);
                 body.add_call(
                     &is_ptr_initialized_instance,
                     source,
@@ -270,24 +283,11 @@ impl UninitPass {
                 );
             }
             PointeeLayout::TraitObject => {
-                collect_skipped(&operation, body, skip_first);
                 let reason = "Kani does not support reasoning about memory initialization of pointers to trait objects.";
-                self.unsupported_check(tcx, body, source, operation.position(), reason);
+                self.unsupported_check(tcx, body, source, operation.position(), reason, skip_first);
                 return;
             }
         };
-
-        // Make sure all non-padding bytes are initialized.
-        collect_skipped(&operation, body, skip_first);
-        let ptr_operand_ty = ptr_operand.ty(body.locals()).unwrap();
-        body.add_check(
-            tcx,
-            &self.check_type,
-            source,
-            operation.position(),
-            ret_place.local,
-            &format!("Undefined Behavior: Reading from an uninitialized pointer of type `{ptr_operand_ty}`"),
-        )
     }
 
     /// Inject a store into memory initialization state to initialize or deinitialize all
@@ -305,7 +305,7 @@ impl UninitPass {
             local: body.new_local(Ty::new_tuple(&[]), source.span(body.blocks()), Mutability::Not),
             projection: vec![],
         };
-        let ptr_operand = operation.mk_operand(body, source);
+        let ptr_operand = operation.mk_operand(body, source, skip_first);
         let value = operation.expect_value();
 
         match pointee_info.layout() {
@@ -315,8 +315,9 @@ impl UninitPass {
                     layout.len(),
                     *pointee_info.ty(),
                 );
-                let layout_operand = mk_layout_operand(body, source, operation.position(), &layout);
-                collect_skipped(&operation, body, skip_first);
+                let layout_operand =
+                    mk_layout_operand(body, source, operation.position(), &layout, skip_first);
+                collect_skipped(operation.position(), source, body, skip_first);
                 body.add_call(
                     &set_ptr_initialized_instance,
                     source,
@@ -350,9 +351,14 @@ impl UninitPass {
                     element_layout.len(),
                     slicee_ty,
                 );
-                let layout_operand =
-                    mk_layout_operand(body, source, operation.position(), &element_layout);
-                collect_skipped(&operation, body, skip_first);
+                let layout_operand = mk_layout_operand(
+                    body,
+                    source,
+                    operation.position(),
+                    &element_layout,
+                    skip_first,
+                );
+                collect_skipped(operation.position(), source, body, skip_first);
                 body.add_call(
                     &set_ptr_initialized_instance,
                     source,
@@ -382,6 +388,7 @@ impl UninitPass {
         source: &mut SourceInstruction,
         position: InsertPosition,
         reason: &str,
+        skip_first: &mut HashSet<usize>,
     ) {
         let span = source.span(body.blocks());
         let rvalue = Rvalue::Use(Operand::Constant(ConstOperand {
@@ -389,7 +396,9 @@ impl UninitPass {
             span,
             user_ty: None,
         }));
+        collect_skipped(position, source, body, skip_first);
         let result = body.new_assignment(rvalue, source, position);
+        collect_skipped(position, source, body, skip_first);
         body.add_check(tcx, &self.check_type, source, position, result, reason);
     }
 }
@@ -411,8 +420,10 @@ pub fn mk_layout_operand(
     source: &mut SourceInstruction,
     position: InsertPosition,
     layout_byte_mask: &[bool],
+    skip_first: &mut HashSet<usize>,
 ) -> Operand {
-    Operand::Move(Place {
+    collect_skipped(position, source, body, skip_first);
+    let operand = Operand::Move(Place {
         local: body.new_assignment(
             Rvalue::Aggregate(
                 AggregateKind::Array(Ty::bool_ty()),
@@ -431,13 +442,21 @@ pub fn mk_layout_operand(
             position,
         ),
         projection: vec![],
-    })
+    });
+    operand
 }
 
 /// If injecting a new call to the function before the current statement, need to skip the original
 /// statement when analyzing it as a part of the new basic block.
-fn collect_skipped(operation: &MemoryInitOp, body: &MutableBody, skip_first: &mut HashSet<usize>) {
-    if operation.position() == InsertPosition::Before {
+fn collect_skipped(
+    position: InsertPosition,
+    source: &SourceInstruction,
+    body: &MutableBody,
+    skip_first: &mut HashSet<usize>,
+) {
+    if position == InsertPosition::Before
+        || (position == InsertPosition::After && source.is_terminator())
+    {
         let new_bb_idx = body.blocks().len();
         skip_first.insert(new_bb_idx);
     }

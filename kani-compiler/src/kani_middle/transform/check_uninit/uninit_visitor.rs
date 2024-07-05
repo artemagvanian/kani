@@ -3,6 +3,8 @@
 //
 //! Visitor that collects all instructions relevant to uninitialized memory access.
 
+use std::collections::HashSet;
+
 use crate::kani_middle::transform::body::{InsertPosition, MutableBody, SourceInstruction};
 use stable_mir::mir::alloc::GlobalAlloc;
 use stable_mir::mir::mono::{Instance, InstanceKind};
@@ -15,6 +17,8 @@ use stable_mir::mir::{
 use stable_mir::ty::{ConstantKind, MirConst, RigidTy, Span, TyKind, UintTy};
 use strum_macros::AsRefStr;
 
+use super::collect_skipped;
+
 /// Memory initialization operations: set or get memory initialization state for a given pointer.
 #[derive(AsRefStr, Clone, Debug)]
 pub enum MemoryInitOp {
@@ -24,6 +28,9 @@ pub enum MemoryInitOp {
     /// Set memory initialization state of data bytes in a memory region starting from the pointer
     /// `operand` and of length `count * sizeof(operand)` bytes.
     Set { operand: Operand, count: Operand, value: bool, position: InsertPosition },
+    /// Check memory initialization of data bytes in a memory region starting from the reference to
+    /// `operand` and of length `count * sizeof(operand)` bytes.
+    CheckRef { operand: Operand, count: Operand },
     /// Set memory initialization of data bytes in a memory region starting from the reference to
     /// `operand` and of length `count * sizeof(operand)` bytes.
     SetRef { operand: Operand, count: Operand, value: bool, position: InsertPosition },
@@ -35,25 +42,34 @@ impl MemoryInitOp {
     /// Produce an operand for the relevant memory initialization related operation. This is mostly
     /// required so that the analysis can create a new local to take a reference in
     /// `MemoryInitOp::SetRef`.
-    pub fn mk_operand(&self, body: &mut MutableBody, source: &mut SourceInstruction) -> Operand {
+    pub fn mk_operand(
+        &self,
+        body: &mut MutableBody,
+        source: &mut SourceInstruction,
+        skip_first: &mut HashSet<usize>,
+    ) -> Operand {
         match self {
             MemoryInitOp::Check { operand, .. } | MemoryInitOp::Set { operand, .. } => {
                 operand.clone()
             }
-            MemoryInitOp::SetRef { operand, .. } => Operand::Copy(Place {
-                local: {
-                    let place = match operand {
-                        Operand::Copy(place) | Operand::Move(place) => place,
-                        Operand::Constant(_) => unreachable!(),
-                    };
-                    body.new_assignment(
-                        Rvalue::AddressOf(Mutability::Not, place.clone()),
-                        source,
-                        self.position(),
-                    )
-                },
-                projection: vec![],
-            }),
+            MemoryInitOp::SetRef { operand, .. } | MemoryInitOp::CheckRef { operand, .. } => {
+                collect_skipped(self.position(), source, body, skip_first);
+                let operand = Operand::Copy(Place {
+                    local: {
+                        let place = match operand {
+                            Operand::Copy(place) | Operand::Move(place) => place,
+                            Operand::Constant(_) => unreachable!(),
+                        };
+                        body.new_assignment(
+                            Rvalue::AddressOf(Mutability::Not, place.clone()),
+                            source,
+                            self.position(),
+                        )
+                    },
+                    projection: vec![],
+                });
+                operand
+            }
             MemoryInitOp::Unsupported { .. } => unreachable!(),
         }
     }
@@ -62,6 +78,7 @@ impl MemoryInitOp {
         match self {
             MemoryInitOp::Check { count, .. }
             | MemoryInitOp::Set { count, .. }
+            | MemoryInitOp::CheckRef { count, .. }
             | MemoryInitOp::SetRef { count, .. } => count.clone(),
             MemoryInitOp::Unsupported { .. } => unreachable!(),
         }
@@ -70,14 +87,18 @@ impl MemoryInitOp {
     pub fn expect_value(&self) -> bool {
         match self {
             MemoryInitOp::Set { value, .. } | MemoryInitOp::SetRef { value, .. } => *value,
-            MemoryInitOp::Check { .. } | MemoryInitOp::Unsupported { .. } => unreachable!(),
+            MemoryInitOp::Check { .. }
+            | MemoryInitOp::CheckRef { .. }
+            | MemoryInitOp::Unsupported { .. } => unreachable!(),
         }
     }
 
     pub fn position(&self) -> InsertPosition {
         match self {
             MemoryInitOp::Set { position, .. } | MemoryInitOp::SetRef { position, .. } => *position,
-            MemoryInitOp::Check { .. } | MemoryInitOp::Unsupported { .. } => InsertPosition::Before,
+            MemoryInitOp::Check { .. }
+            | MemoryInitOp::CheckRef { .. }
+            | MemoryInitOp::Unsupported { .. } => InsertPosition::Before,
         }
     }
 }
@@ -144,6 +165,37 @@ impl<'a> CheckUninitVisitor<'a> {
         });
         target.push_operation(source_op);
     }
+
+    /// Checks memory initialization of inner dereference projections.
+    fn check_inner_derefs(&mut self, place: &Place, ptx: PlaceContext, location: Location) {
+        for (idx, elem) in place.projection.iter().enumerate() {
+            let intermediate_place =
+                Place { local: place.local, projection: place.projection[..idx].to_vec() };
+            match elem {
+                ProjectionElem::Deref => {
+                    self.push_target(MemoryInitOp::Check {
+                        operand: Operand::Copy(intermediate_place.clone()),
+                        count: mk_const_operand(1, location.span()),
+                    });
+                }
+                ProjectionElem::Field(idx, target_ty) => {
+                    if target_ty.kind().is_union()
+                        && (!ptx.is_mutating() || place.projection.len() > idx + 1)
+                    {
+                        self.push_target(MemoryInitOp::Unsupported {
+                            reason: "Kani does not support reasoning about memory initialization of unions.".to_string(),
+                        });
+                    }
+                }
+                ProjectionElem::Index(_)
+                | ProjectionElem::ConstantIndex { .. }
+                | ProjectionElem::Subslice { .. } => {}
+                ProjectionElem::Downcast(_) => {}
+                ProjectionElem::OpaqueCast(_) => {}
+                ProjectionElem::Subtype(_) => {}
+            }
+        }
+    }
 }
 
 impl<'a> MirVisitor for CheckUninitVisitor<'a> {
@@ -151,88 +203,32 @@ impl<'a> MirVisitor for CheckUninitVisitor<'a> {
         if self.skip_next {
             self.skip_next = false;
         } else if self.target.is_none() {
-            // Leave it as an exhaustive match to be notified when a new kind is added.
             match &stmt.kind {
-                StatementKind::Intrinsic(NonDivergingIntrinsic::CopyNonOverlapping(copy)) => {
-                    self.super_statement(stmt, location);
-                    // Source is a *const T and it must be initialized.
-                    self.push_target(MemoryInitOp::Check {
-                        operand: copy.src.clone(),
-                        count: copy.count.clone(),
-                    });
-                    // Destimation is a *mut T so it gets initialized.
-                    self.push_target(MemoryInitOp::Set {
-                        operand: copy.dst.clone(),
-                        count: copy.count.clone(),
-                        value: true,
-                        position: InsertPosition::After,
-                    });
-                }
-                StatementKind::Assign(place, rvalue) => {
-                    // First check rvalue.
-                    self.visit_rvalue(rvalue, location);
-                    // Check whether we are assigning into a dereference (*ptr = _).
-                    if let Some(place_without_deref) = try_remove_topmost_deref(place) {
-                        // First, check that we are not dereferencing extra pointers along the way
-                        // (e.g., **ptr = _). If yes, check whether these pointers are initialized.
-                        let mut place_to_add_projections =
-                            Place { local: place_without_deref.local, projection: vec![] };
-                        for projection_elem in place_without_deref.projection.iter() {
-                            // If the projection is Deref and the current type is raw pointer, check
-                            // if it points to initialized memory.
-                            if *projection_elem == ProjectionElem::Deref {
-                                if let TyKind::RigidTy(RigidTy::RawPtr(..)) =
-                                    place_to_add_projections.ty(&self.locals).unwrap().kind()
-                                {
-                                    self.push_target(MemoryInitOp::Check {
-                                        operand: Operand::Copy(place_to_add_projections.clone()),
-                                        count: mk_const_operand(1, location.span()),
-                                    });
-                                };
-                            }
-                            place_to_add_projections.projection.push(projection_elem.clone());
-                        }
-                        if place_without_deref.ty(&self.locals).unwrap().kind().is_raw_ptr() {
+                // We only care about intrinsics, because everything else is handled by checking
+                // places inside `super_statement`.
+                StatementKind::Intrinsic(non_diverging_intrinsic) => {
+                    match non_diverging_intrinsic {
+                        NonDivergingIntrinsic::CopyNonOverlapping(copy) => {
+                            self.super_statement(stmt, location);
+                            // Source is a *const T and it must be initialized.
+                            self.push_target(MemoryInitOp::Check {
+                                operand: copy.src.clone(),
+                                count: copy.count.clone(),
+                            });
+                            // Destimation is a *mut T so it gets initialized.
                             self.push_target(MemoryInitOp::Set {
-                                operand: Operand::Copy(place_without_deref),
-                                count: mk_const_operand(1, location.span()),
+                                operand: copy.dst.clone(),
+                                count: copy.count.clone(),
                                 value: true,
                                 position: InsertPosition::After,
                             });
                         }
-                    }
-                    // Check whether Rvalue creates a new initialized pointer previously not captured inside shadow memory.
-                    if place.ty(&self.locals).unwrap().kind().is_raw_ptr() {
-                        if let Rvalue::AddressOf(..) = rvalue {
-                            self.push_target(MemoryInitOp::Set {
-                                operand: Operand::Copy(place.clone()),
-                                count: mk_const_operand(1, location.span()),
-                                value: true,
-                                position: InsertPosition::After,
-                            });
-                        }
+                        NonDivergingIntrinsic::Assume(_) => {}
                     }
                 }
-                StatementKind::Deinit(place) => {
+                _ => {
                     self.super_statement(stmt, location);
-                    self.push_target(MemoryInitOp::Set {
-                        operand: Operand::Copy(place.clone()),
-                        count: mk_const_operand(1, location.span()),
-                        value: false,
-                        position: InsertPosition::After,
-                    });
                 }
-                StatementKind::FakeRead(_, _)
-                | StatementKind::SetDiscriminant { .. }
-                | StatementKind::StorageLive(_)
-                | StatementKind::StorageDead(_)
-                | StatementKind::Retag(_, _)
-                | StatementKind::PlaceMention(_)
-                | StatementKind::AscribeUserType { .. }
-                | StatementKind::Coverage(_)
-                | StatementKind::ConstEvalCounter
-                | StatementKind::Intrinsic(NonDivergingIntrinsic::Assume(_))
-                | StatementKind::Nop => self.super_statement(stmt, location),
             }
         }
         let SourceInstruction::Statement { idx, bb } = self.current else { unreachable!() };
@@ -249,7 +245,6 @@ impl<'a> MirVisitor for CheckUninitVisitor<'a> {
                     let instance = match try_resolve_instance(self.locals, func) {
                         Ok(instance) => instance,
                         Err(reason) => {
-                            self.super_terminator(term, location);
                             self.push_target(MemoryInitOp::Unsupported { reason });
                             return;
                         }
@@ -437,16 +432,22 @@ impl<'a> MirVisitor for CheckUninitVisitor<'a> {
                                             position: InsertPosition::After,
                                         });
                                     }
-                                    _ => {}
+                                    _ => {
+                                        /* Check memory initialization of arguments */
+                                        self.super_terminator(term, location);
+                                    }
                                 }
                             }
                         }
-                        _ => {}
+                        _ => {
+                            /* Check memory initialization of arguments */
+                            self.super_terminator(term, location);
+                        }
                     }
                 }
                 TerminatorKind::Drop { place, .. } => {
+                    /* Check memory initialization of arguments */
                     self.super_terminator(term, location);
-                    let place_ty = place.ty(&self.locals).unwrap();
 
                     // When drop is codegen'ed for types that could define their own dropping
                     // behavior, a reference is taken to the place which is later implicitly coerced
@@ -468,15 +469,6 @@ impl<'a> MirVisitor for CheckUninitVisitor<'a> {
                         }
                         _ => {}
                     }
-
-                    if place_ty.kind().is_raw_ptr() {
-                        self.push_target(MemoryInitOp::Set {
-                            operand: Operand::Copy(place.clone()),
-                            count: mk_const_operand(1, location.span()),
-                            value: false,
-                            position: InsertPosition::After,
-                        });
-                    }
                 }
                 TerminatorKind::Goto { .. }
                 | TerminatorKind::SwitchInt { .. }
@@ -484,45 +476,33 @@ impl<'a> MirVisitor for CheckUninitVisitor<'a> {
                 | TerminatorKind::Abort
                 | TerminatorKind::Return
                 | TerminatorKind::Unreachable
-                | TerminatorKind::Assert { .. }
                 | TerminatorKind::InlineAsm { .. } => self.super_terminator(term, location),
+                TerminatorKind::Assert { .. } => {}
             }
         }
     }
 
     fn visit_place(&mut self, place: &Place, ptx: PlaceContext, location: Location) {
-        for (idx, elem) in place.projection.iter().enumerate() {
-            let intermediate_place =
-                Place { local: place.local, projection: place.projection[..idx].to_vec() };
-            match elem {
-                ProjectionElem::Deref => {
-                    let ptr_ty = intermediate_place.ty(self.locals).unwrap();
-                    if ptr_ty.kind().is_raw_ptr() {
-                        self.push_target(MemoryInitOp::Check {
-                            operand: Operand::Copy(intermediate_place.clone()),
-                            count: mk_const_operand(1, location.span()),
-                        });
-                    }
+        if ptx.is_mutating() {
+            match try_remove_topmost_deref(place) {
+                Some(place_without_deref) => {
+                    self.check_inner_derefs(&place_without_deref, ptx, location);
                 }
-                ProjectionElem::Field(idx, target_ty) => {
-                    if target_ty.kind().is_union()
-                        && (!ptx.is_mutating() || place.projection.len() > idx + 1)
-                    {
-                        self.push_target(MemoryInitOp::Unsupported {
-                            reason: "Kani does not support reasoning about memory initialization of unions.".to_string(),
-                        });
-                    }
-                }
-                ProjectionElem::Index(_)
-                | ProjectionElem::ConstantIndex { .. }
-                | ProjectionElem::Subslice { .. } => {
-                    /* For a slice to be indexed, it should be valid first. */
-                }
-                ProjectionElem::Downcast(_) => {}
-                ProjectionElem::OpaqueCast(_) => {}
-                ProjectionElem::Subtype(_) => {}
+                None => {}
             }
-        }
+            self.push_target(MemoryInitOp::SetRef {
+                operand: Operand::Copy(place.clone()),
+                count: mk_const_operand(1, location.span()),
+                value: true,
+                position: InsertPosition::After,
+            });
+        } else {
+            self.check_inner_derefs(place, ptx, location);
+            self.push_target(MemoryInitOp::CheckRef {
+                operand: Operand::Copy(place.clone()),
+                count: mk_const_operand(1, location.span()),
+            });
+        };
         self.super_place(place, ptx, location)
     }
 
@@ -531,9 +511,16 @@ impl<'a> MirVisitor for CheckUninitVisitor<'a> {
             if let ConstantKind::Allocated(allocation) = constant.const_.kind() {
                 for (_, prov) in &allocation.provenance.ptrs {
                     if let GlobalAlloc::Static(_) = GlobalAlloc::from(prov.0) {
-                        if constant.ty().kind().is_raw_ptr() {
+                        if constant.ty().kind().is_raw_ptr() || constant.ty().kind().is_ref() {
                             // If a static is a raw pointer, need to mark it as initialized.
                             self.push_target(MemoryInitOp::Set {
+                                operand: Operand::Constant(constant.clone()),
+                                count: mk_const_operand(1, location.span()),
+                                value: true,
+                                position: InsertPosition::Before,
+                            });
+                        } else {
+                            self.push_target(MemoryInitOp::SetRef {
                                 operand: Operand::Constant(constant.clone()),
                                 count: mk_const_operand(1, location.span()),
                                 value: true,
@@ -548,6 +535,7 @@ impl<'a> MirVisitor for CheckUninitVisitor<'a> {
     }
 
     fn visit_rvalue(&mut self, rvalue: &Rvalue, location: Location) {
+        self.super_rvalue(rvalue, location);
         if let Rvalue::Cast(CastKind::PointerCoercion(PointerCoercion::Unsize), _, ty) = rvalue {
             if let TyKind::RigidTy(RigidTy::RawPtr(pointee_ty, _)) = ty.kind() {
                 if pointee_ty.kind().is_trait() {
@@ -557,7 +545,6 @@ impl<'a> MirVisitor for CheckUninitVisitor<'a> {
                 }
             }
         };
-        self.super_rvalue(rvalue, location);
     }
 }
 

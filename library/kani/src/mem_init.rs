@@ -55,16 +55,14 @@ impl MemoryInitializationState {
         ptr: *const u8,
         layout: Layout<LAYOUT_SIZE>,
         num_elts: usize,
-    ) -> bool {
+    ) {
         let obj = crate::mem::pointer_object(ptr);
         let offset = crate::mem::pointer_offset(ptr);
         if self.tracked_object_id == obj
             && self.tracked_offset >= offset
             && self.tracked_offset < offset + num_elts * LAYOUT_SIZE
         {
-            !layout[(self.tracked_offset - offset) % LAYOUT_SIZE] || self.value
-        } else {
-            true
+            assert!(!layout[(self.tracked_offset - offset) % LAYOUT_SIZE] || self.value)
         }
     }
 
@@ -112,9 +110,9 @@ fn is_unit_ptr_initialized<const LAYOUT_SIZE: usize>(
     ptr: *const (),
     layout: Layout<LAYOUT_SIZE>,
     num_elts: usize,
-) -> bool {
+) {
     if LAYOUT_SIZE == 0 {
-        return true;
+        return;
     }
     unsafe { MEM_INIT_STATE.get(ptr as *const u8, layout, num_elts) }
 }
@@ -141,7 +139,7 @@ fn is_ptr_initialized<const LAYOUT_SIZE: usize, T>(
     ptr: *const T,
     layout: Layout<LAYOUT_SIZE>,
     num_elts: usize,
-) -> bool {
+) {
     let (ptr, _) = ptr.to_raw_parts();
     is_unit_ptr_initialized(ptr, layout, num_elts)
 }
@@ -163,7 +161,7 @@ fn set_ptr_initialized<const LAYOUT_SIZE: usize, T>(
 fn is_slice_ptr_initialized<const LAYOUT_SIZE: usize, T>(
     ptr: *const [T],
     layout: Layout<LAYOUT_SIZE>,
-) -> bool {
+) {
     let (ptr, num_elts) = ptr.to_raw_parts();
     is_unit_ptr_initialized(ptr, layout, num_elts)
 }
@@ -184,7 +182,7 @@ fn set_slice_ptr_initialized<const LAYOUT_SIZE: usize, T>(
 fn is_str_ptr_initialized<const LAYOUT_SIZE: usize>(
     ptr: *const str,
     layout: Layout<LAYOUT_SIZE>,
-) -> bool {
+) {
     let (ptr, num_elts) = ptr.to_raw_parts();
     is_unit_ptr_initialized(ptr, layout, num_elts)
 }
