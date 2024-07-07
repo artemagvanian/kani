@@ -185,125 +185,125 @@ impl IntrinsicGeneratorPass {
             return new_body.into();
         }
 
-        let mut skip_first = HashSet::new();
+        // let mut skip_first = HashSet::new();
 
-        // The first argument type.
-        let arg_ty = new_body.locals()[1].ty;
-        let TyKind::RigidTy(RigidTy::RawPtr(target_ty, _)) = arg_ty.kind() else { unreachable!() };
-        let pointee_info = PointeeInfo::from_ty(target_ty);
-        match pointee_info {
-            Ok(pointee_info) => {
-                match pointee_info.layout() {
-                    PointeeLayout::Sized { layout } => {
-                        if layout.is_empty() {
-                            // Encountered a ZST, so we can short-circut here.
-                            return new_body.into();
-                        }
-                        let is_ptr_initialized_instance = resolve_mem_init_fn(
-                            get_mem_init_fn_def(
-                                tcx,
-                                "KaniIsPtrInitialized",
-                                &mut self.mem_init_fn_cache,
-                            ),
-                            layout.len(),
-                            *pointee_info.ty(),
-                        );
-                        let layout_operand = mk_layout_operand(
-                            &mut new_body,
-                            &mut terminator,
-                            InsertPosition::Before,
-                            &layout,
-                            &mut skip_first,
-                        );
-                        new_body.add_call(
-                            &is_ptr_initialized_instance,
-                            &mut terminator,
-                            InsertPosition::Before,
-                            vec![
-                                Operand::Copy(Place::from(1)),
-                                layout_operand,
-                                Operand::Copy(Place::from(2)),
-                            ],
-                            Place::from(ret_var),
-                        );
-                    }
-                    PointeeLayout::Slice { element_layout } => {
-                        // Since `str`` is a separate type, need to differentiate between [T] and str.
-                        let (slicee_ty, diagnostic) = match pointee_info.ty().kind() {
-                            TyKind::RigidTy(RigidTy::Slice(slicee_ty)) => {
-                                (slicee_ty, "KaniIsSlicePtrInitialized")
-                            }
-                            TyKind::RigidTy(RigidTy::Str) => {
-                                (Ty::unsigned_ty(UintTy::U8), "KaniIsStrPtrInitialized")
-                            }
-                            _ => unreachable!(),
-                        };
-                        let is_ptr_initialized_instance = resolve_mem_init_fn(
-                            get_mem_init_fn_def(tcx, diagnostic, &mut self.mem_init_fn_cache),
-                            element_layout.len(),
-                            slicee_ty,
-                        );
-                        let layout_operand = mk_layout_operand(
-                            &mut new_body,
-                            &mut terminator,
-                            InsertPosition::Before,
-                            &element_layout,
-                            &mut skip_first,
-                        );
-                        new_body.add_call(
-                            &is_ptr_initialized_instance,
-                            &mut terminator,
-                            InsertPosition::Before,
-                            vec![Operand::Copy(Place::from(1)), layout_operand],
-                            Place::from(ret_var),
-                        );
-                    }
-                    PointeeLayout::TraitObject => {
-                        let rvalue = Rvalue::Use(Operand::Constant(ConstOperand {
-                            const_: MirConst::from_bool(false),
-                            span,
-                            user_ty: None,
-                        }));
-                        let result = new_body.new_assignment(
-                            rvalue,
-                            &mut terminator,
-                            InsertPosition::Before,
-                        );
-                        let reason: &str = "Kani does not support reasoning about memory initialization of pointers to trait objects.";
+        // // The first argument type.
+        // let arg_ty = new_body.locals()[1].ty;
+        // let TyKind::RigidTy(RigidTy::RawPtr(target_ty, _)) = arg_ty.kind() else { unreachable!() };
+        // let pointee_info = PointeeInfo::from_ty(target_ty);
+        // match pointee_info {
+        //     Ok(pointee_info) => {
+        //         match pointee_info.layout() {
+        //             PointeeLayout::Sized { layout } => {
+        //                 if layout.is_empty() {
+        //                     // Encountered a ZST, so we can short-circut here.
+        //                     return new_body.into();
+        //                 }
+        //                 let is_ptr_initialized_instance = resolve_mem_init_fn(
+        //                     get_mem_init_fn_def(
+        //                         tcx,
+        //                         "KaniIsPtrInitialized",
+        //                         &mut self.mem_init_fn_cache,
+        //                     ),
+        //                     layout.len(),
+        //                     *pointee_info.ty(),
+        //                 );
+        //                 let layout_operand = mk_layout_operand(
+        //                     &mut new_body,
+        //                     &mut terminator,
+        //                     InsertPosition::Before,
+        //                     &layout,
+        //                     &mut skip_first,
+        //                 );
+        //                 new_body.add_call(
+        //                     &is_ptr_initialized_instance,
+        //                     &mut terminator,
+        //                     InsertPosition::Before,
+        //                     vec![
+        //                         Operand::Copy(Place::from(1)),
+        //                         layout_operand,
+        //                         Operand::Copy(Place::from(2)),
+        //                     ],
+        //                     Place::from(ret_var),
+        //                 );
+        //             }
+        //             PointeeLayout::Slice { element_layout } => {
+        //                 // Since `str`` is a separate type, need to differentiate between [T] and str.
+        //                 let (slicee_ty, diagnostic) = match pointee_info.ty().kind() {
+        //                     TyKind::RigidTy(RigidTy::Slice(slicee_ty)) => {
+        //                         (slicee_ty, "KaniIsSlicePtrInitialized")
+        //                     }
+        //                     TyKind::RigidTy(RigidTy::Str) => {
+        //                         (Ty::unsigned_ty(UintTy::U8), "KaniIsStrPtrInitialized")
+        //                     }
+        //                     _ => unreachable!(),
+        //                 };
+        //                 let is_ptr_initialized_instance = resolve_mem_init_fn(
+        //                     get_mem_init_fn_def(tcx, diagnostic, &mut self.mem_init_fn_cache),
+        //                     element_layout.len(),
+        //                     slicee_ty,
+        //                 );
+        //                 let layout_operand = mk_layout_operand(
+        //                     &mut new_body,
+        //                     &mut terminator,
+        //                     InsertPosition::Before,
+        //                     &element_layout,
+        //                     &mut skip_first,
+        //                 );
+        //                 new_body.add_call(
+        //                     &is_ptr_initialized_instance,
+        //                     &mut terminator,
+        //                     InsertPosition::Before,
+        //                     vec![Operand::Copy(Place::from(1)), layout_operand],
+        //                     Place::from(ret_var),
+        //                 );
+        //             }
+        //             PointeeLayout::TraitObject => {
+        //                 let rvalue = Rvalue::Use(Operand::Constant(ConstOperand {
+        //                     const_: MirConst::from_bool(false),
+        //                     span,
+        //                     user_ty: None,
+        //                 }));
+        //                 let result = new_body.new_assignment(
+        //                     rvalue,
+        //                     &mut terminator,
+        //                     InsertPosition::Before,
+        //                 );
+        //                 let reason: &str = "Kani does not support reasoning about memory initialization of pointers to trait objects.";
 
-                        new_body.add_check(
-                            tcx,
-                            &self.check_type,
-                            &mut terminator,
-                            InsertPosition::Before,
-                            result,
-                            &reason,
-                        );
-                    }
-                };
-            }
-            Err(msg) => {
-                // We failed to retrieve the type layout.
-                let rvalue = Rvalue::Use(Operand::Constant(ConstOperand {
-                    const_: MirConst::from_bool(false),
-                    span,
-                    user_ty: None,
-                }));
-                let result =
-                    new_body.new_assignment(rvalue, &mut terminator, InsertPosition::Before);
-                let reason = format!(
-                    "Kani currently doesn't support checking memory initialization of `{target_ty}`. {msg}"
-                );
-                new_body.add_check(
-                    tcx,
-                    &self.check_type,
-                    &mut terminator,
-                    InsertPosition::Before,
-                    result,
-                    &reason,
-                );
-            }
-        }
+        //                 new_body.add_check(
+        //                     tcx,
+        //                     &self.check_type,
+        //                     &mut terminator,
+        //                     InsertPosition::Before,
+        //                     result,
+        //                     &reason,
+        //                 );
+        //             }
+        //         };
+        //     }
+        //     Err(msg) => {
+        //         // We failed to retrieve the type layout.
+        //         let rvalue = Rvalue::Use(Operand::Constant(ConstOperand {
+        //             const_: MirConst::from_bool(false),
+        //             span,
+        //             user_ty: None,
+        //         }));
+        //         let result =
+        //             new_body.new_assignment(rvalue, &mut terminator, InsertPosition::Before);
+        //         let reason = format!(
+        //             "Kani currently doesn't support checking memory initialization of `{target_ty}`. {msg}"
+        //         );
+        //         new_body.add_check(
+        //             tcx,
+        //             &self.check_type,
+        //             &mut terminator,
+        //             InsertPosition::Before,
+        //             result,
+        //             &reason,
+        //         );
+        //     }
+        // }
         new_body.into()
     }
 }

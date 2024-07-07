@@ -3,21 +3,17 @@
 //
 //! Visitor that collects all instructions relevant to uninitialized memory access.
 
-use std::collections::HashSet;
-
 use crate::kani_middle::transform::body::{InsertPosition, MutableBody, SourceInstruction};
 use stable_mir::mir::alloc::GlobalAlloc;
 use stable_mir::mir::mono::{Instance, InstanceKind};
 use stable_mir::mir::visit::{Location, PlaceContext};
 use stable_mir::mir::{
-    BasicBlockIdx, CastKind, ConstOperand, LocalDecl, MirVisitor, Mutability,
+    BasicBlock, BasicBlockIdx, CastKind, ConstOperand, LocalDecl, MirVisitor, Mutability,
     NonDivergingIntrinsic, Operand, Place, PointerCoercion, ProjectionElem, Rvalue, Statement,
     StatementKind, Terminator, TerminatorKind,
 };
-use stable_mir::ty::{ConstantKind, MirConst, RigidTy, Span, TyKind, UintTy};
+use stable_mir::ty::{ConstantKind, MirConst, RigidTy, Span, Ty, TyKind, UintTy};
 use strum_macros::AsRefStr;
-
-use super::collect_skipped;
 
 /// Memory initialization operations: set or get memory initialization state for a given pointer.
 #[derive(AsRefStr, Clone, Debug)]
@@ -45,30 +41,120 @@ impl MemoryInitOp {
     pub fn mk_operand(
         &self,
         body: &mut MutableBody,
+        bb: &mut BasicBlock,
         source: &mut SourceInstruction,
-        skip_first: &mut HashSet<usize>,
     ) -> Operand {
         match self {
             MemoryInitOp::Check { operand, .. } | MemoryInitOp::Set { operand, .. } => {
-                operand.clone()
+                let span = source.span(body.blocks());
+
+                let appropriate_unit_ptr_ty =
+                    match operand.ty(body.locals()).unwrap().kind().rigid().unwrap() {
+                        RigidTy::Ref(_, pointee_ty, _) | RigidTy::RawPtr(pointee_ty, _) => {
+                            match pointee_ty.kind().rigid().unwrap() {
+                                RigidTy::Slice(..) | RigidTy::Str => {
+                                    Ty::from_rigid_kind(RigidTy::RawPtr(
+                                        Ty::from_rigid_kind(RigidTy::Slice(Ty::from_rigid_kind(
+                                            RigidTy::Tuple(vec![]),
+                                        ))),
+                                        Mutability::Not,
+                                    ))
+                                }
+                                _ => Ty::from_rigid_kind(RigidTy::RawPtr(
+                                    Ty::from_rigid_kind(RigidTy::Tuple(vec![])),
+                                    Mutability::Not,
+                                )),
+                            }
+                        }
+                        _ => unreachable!(),
+                    };
+
+                let unit_local = {
+                    let rvalue =
+                        Rvalue::Cast(CastKind::Transmute, operand.clone(), appropriate_unit_ptr_ty);
+                    let ret_ty = rvalue.ty(body.locals()).unwrap();
+                    let result = body.new_local(ret_ty, span, Mutability::Not);
+                    let stmt = Statement {
+                        kind: StatementKind::Assign(Place::from(result), rvalue),
+                        span,
+                    };
+                    bb.statements.push(stmt);
+                    result
+                };
+
+                Operand::Copy(Place { local: unit_local, projection: vec![] })
             }
             MemoryInitOp::SetRef { operand, .. } | MemoryInitOp::CheckRef { operand, .. } => {
-                collect_skipped(self.position(), source, body, skip_first);
-                let operand = Operand::Copy(Place {
-                    local: {
-                        let place = match operand {
-                            Operand::Copy(place) | Operand::Move(place) => place,
-                            Operand::Constant(_) => unreachable!(),
-                        };
-                        body.new_assignment(
-                            Rvalue::AddressOf(Mutability::Not, place.clone()),
-                            source,
-                            self.position(),
-                        )
-                    },
-                    projection: vec![],
-                });
-                operand
+                let span = source.span(body.blocks());
+
+                let (ref_local, ret_ty) = {
+                    let place = match operand {
+                        Operand::Copy(place) | Operand::Move(place) => place,
+                        Operand::Constant(_) => unreachable!(),
+                    };
+                    let rvalue = Rvalue::AddressOf(Mutability::Not, place.clone());
+                    let ret_ty = rvalue.ty(body.locals()).unwrap();
+                    let result = body.new_local(ret_ty, span, Mutability::Not);
+                    let stmt = Statement {
+                        kind: StatementKind::Assign(Place::from(result), rvalue),
+                        span,
+                    };
+                    bb.statements.push(stmt);
+                    (result, ret_ty)
+                };
+
+                let appropriate_unit_ptr_ty = match ret_ty.kind().rigid().unwrap() {
+                    RigidTy::Ref(_, pointee_ty, _) | RigidTy::RawPtr(pointee_ty, _) => {
+                        match pointee_ty.kind().rigid().unwrap() {
+                            RigidTy::Slice(..) | RigidTy::Str => {
+                                Ty::from_rigid_kind(RigidTy::RawPtr(
+                                    Ty::from_rigid_kind(RigidTy::Slice(Ty::from_rigid_kind(
+                                        RigidTy::Tuple(vec![]),
+                                    ))),
+                                    Mutability::Not,
+                                ))
+                            }
+                            _ => Ty::from_rigid_kind(RigidTy::RawPtr(
+                                Ty::from_rigid_kind(RigidTy::Tuple(vec![])),
+                                Mutability::Not,
+                            )),
+                        }
+                    }
+                    _ => unreachable!(),
+                };
+
+                let unit_local = {
+                    let operand = Operand::Move(Place::from(ref_local));
+                    let rvalue =
+                        Rvalue::Cast(CastKind::Transmute, operand, appropriate_unit_ptr_ty);
+                    let ret_ty = rvalue.ty(body.locals()).unwrap();
+                    let result = body.new_local(ret_ty, span, Mutability::Not);
+                    let stmt = Statement {
+                        kind: StatementKind::Assign(Place::from(result), rvalue),
+                        span,
+                    };
+                    bb.statements.push(stmt);
+                    result
+                };
+
+                Operand::Copy(Place { local: unit_local, projection: vec![] })
+            }
+            MemoryInitOp::Unsupported { .. } => unreachable!(),
+        }
+    }
+
+    pub fn operand_ty(&self, body: &MutableBody) -> Ty {
+        match self {
+            MemoryInitOp::Check { operand, .. } | MemoryInitOp::Set { operand, .. } => {
+                operand.ty(body.locals()).unwrap()
+            }
+            MemoryInitOp::SetRef { operand, .. } | MemoryInitOp::CheckRef { operand, .. } => {
+                let place = match operand {
+                    Operand::Copy(place) | Operand::Move(place) => place,
+                    Operand::Constant(_) => unreachable!(),
+                };
+                let rvalue = Rvalue::AddressOf(Mutability::Not, place.clone());
+                rvalue.ty(body.locals()).unwrap()
             }
             MemoryInitOp::Unsupported { .. } => unreachable!(),
         }
@@ -226,9 +312,10 @@ impl<'a> MirVisitor for CheckUninitVisitor<'a> {
                         NonDivergingIntrinsic::Assume(_) => {}
                     }
                 }
-                _ => {
+                StatementKind::Assign(..) => {
                     self.super_statement(stmt, location);
                 }
+                _ => {}
             }
         }
         let SourceInstruction::Statement { idx, bb } = self.current else { unreachable!() };
@@ -240,7 +327,7 @@ impl<'a> MirVisitor for CheckUninitVisitor<'a> {
             self.current = SourceInstruction::Terminator { bb: self.bb };
             // Leave it as an exhaustive match to be notified when a new kind is added.
             match &term.kind {
-                TerminatorKind::Call { func, args, destination, .. } => {
+                TerminatorKind::Call { func, args, destination, target: Some(_), .. } => {
                     self.super_terminator(term, location);
                     let instance = match try_resolve_instance(self.locals, func) {
                         Ok(instance) => instance,
@@ -470,14 +557,15 @@ impl<'a> MirVisitor for CheckUninitVisitor<'a> {
                         _ => {}
                     }
                 }
-                TerminatorKind::Goto { .. }
-                | TerminatorKind::SwitchInt { .. }
+                TerminatorKind::SwitchInt { .. } => self.super_terminator(term, location),
+                TerminatorKind::Call { target: None, .. }
+                | TerminatorKind::Goto { .. }
                 | TerminatorKind::Resume
                 | TerminatorKind::Abort
                 | TerminatorKind::Return
                 | TerminatorKind::Unreachable
-                | TerminatorKind::InlineAsm { .. } => self.super_terminator(term, location),
-                TerminatorKind::Assert { .. } => {}
+                | TerminatorKind::InlineAsm { .. }
+                | TerminatorKind::Assert { .. } => {}
             }
         }
     }

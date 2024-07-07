@@ -197,6 +197,29 @@ impl MutableBody {
         }
     }
 
+    pub fn add_bb(
+        &mut self,
+        mut bb: BasicBlock,
+        source: &mut SourceInstruction,
+        position: InsertPosition,
+    ) {
+        // Splitting adds 1 block, so the added block index is len + 1;
+        let split_bb_idx = self.blocks().len();
+        let inserted_bb_idx = self.blocks().len() + 1;
+        match &mut bb.terminator.kind {
+            TerminatorKind::Call { target, .. } => {
+                *target = Some(split_bb_idx);
+            }
+            _ => unimplemented!(),
+        }
+        let new_term = Terminator {
+            kind: TerminatorKind::Goto { target: inserted_bb_idx },
+            span: source.span(&self.blocks),
+        };
+        self.split_bb(source, position, new_term);
+        self.blocks.push(bb);
+    }
+
     /// Add a new call to the basic block indicated by the given index.
     ///
     /// The new call will have the same span as the source instruction, and the basic block
@@ -275,8 +298,6 @@ impl MutableBody {
             // and move the remaining statements into the new one.
             SourceInstruction::Statement { idx, bb } => {
                 let (orig_idx, orig_bb) = (*idx, *bb);
-                *idx = 0;
-                *bb = new_bb_idx;
                 let old_term = mem::replace(&mut self.blocks[orig_bb].terminator, new_term);
                 let bb_stmts = &mut self.blocks[orig_bb].statements;
                 let remaining = bb_stmts.split_off(orig_idx + 1);
@@ -288,21 +309,31 @@ impl MutableBody {
             SourceInstruction::Terminator { bb } => {
                 let current_terminator = &mut self.blocks.get_mut(*bb).unwrap().terminator;
                 // Kani can only instrument function calls like this.
-                match (&mut current_terminator.kind, &mut new_term.kind) {
-                    (
-                        TerminatorKind::Call { target: Some(target_bb), .. },
-                        TerminatorKind::Call { target: Some(new_target_bb), .. },
-                    ) => {
-                        // Set the new terminator to point where previous terminator pointed.
-                        *new_target_bb = *target_bb;
-                        // Point the current terminator to the new terminator's basic block.
-                        *target_bb = new_bb_idx;
-                        // Update the current poisition.
-                        *bb = new_bb_idx;
-                        self.blocks.push(BasicBlock { statements: vec![], terminator: new_term });
-                    }
-                    _ => unimplemented!("Kani can only split blocks after calls."),
+
+                let (TerminatorKind::Call { target: Some(target_bb), .. }
+                | TerminatorKind::Goto { target: target_bb }) = &mut current_terminator.kind
+                else {
+                    unimplemented!(
+                        "Kani can only split blocks after calls, encountered: {:?}.",
+                        current_terminator
+                    )
                 };
+                let (TerminatorKind::Call { target: Some(new_target_bb), .. }
+                | TerminatorKind::Goto { target: new_target_bb }) = &mut new_term.kind
+                else {
+                    unimplemented!(
+                        "Kani can only split blocks after calls, encountered: {:?}.",
+                        new_term
+                    )
+                };
+
+                // Set the new terminator to point where previous terminator pointed.
+                *new_target_bb = *target_bb;
+                // Point the current terminator to the new terminator's basic block.
+                *target_bb = new_bb_idx;
+                // Update the current poisition.
+                *bb = new_bb_idx;
+                self.blocks.push(BasicBlock { statements: vec![], terminator: new_term });
             }
         };
     }
