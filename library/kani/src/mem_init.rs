@@ -56,14 +56,16 @@ impl MemoryInitializationState {
         ptr: *const u8,
         layout: Layout<LAYOUT_SIZE>,
         num_elts: usize,
-    ) {
+    ) -> bool {
         let obj = crate::mem::pointer_object(ptr);
         let offset = crate::mem::pointer_offset(ptr);
         if self.tracked_object_id == obj
             && self.tracked_offset >= offset
             && self.tracked_offset < offset + num_elts * LAYOUT_SIZE
         {
-            assert!(!layout[(self.tracked_offset - offset) % LAYOUT_SIZE] || self.value)
+            !layout[(self.tracked_offset - offset) % LAYOUT_SIZE] || self.value
+        } else {
+            true
         }
     }
 
@@ -112,9 +114,9 @@ fn is_unit_ptr_initialized<const LAYOUT_SIZE: usize>(
     ptr: *const (),
     layout: Layout<LAYOUT_SIZE>,
     num_elts: usize,
-) {
+) -> bool {
     if LAYOUT_SIZE == 0 {
-        return;
+        return true;
     }
     unsafe { MEM_INIT_STATE.get(ptr as *const u8, layout, num_elts) }
 }
@@ -142,8 +144,7 @@ fn is_ptr_initialized<const LAYOUT_SIZE: usize>(
     layout: Layout<LAYOUT_SIZE>,
     num_elts: usize,
 ) {
-    let (ptr, _) = ptr.to_raw_parts();
-    is_unit_ptr_initialized(ptr, layout, num_elts)
+    assert!(is_unit_ptr_initialized(ptr, layout, num_elts))
 }
 
 /// Set initialization state to `value` for `num_elts` items laid out according to the `layout` starting at address `ptr`.
@@ -154,7 +155,6 @@ fn set_ptr_initialized<const LAYOUT_SIZE: usize>(
     num_elts: usize,
     value: bool,
 ) {
-    let (ptr, _) = ptr.to_raw_parts();
     set_unit_ptr_initialized(ptr, layout, num_elts, value);
 }
 
@@ -165,31 +165,13 @@ fn is_slice_ptr_initialized<const LAYOUT_SIZE: usize>(
     layout: Layout<LAYOUT_SIZE>,
 ) {
     let (ptr, num_elts) = ptr.to_raw_parts();
-    is_unit_ptr_initialized(ptr, layout, num_elts)
+    assert!(is_unit_ptr_initialized(ptr, layout, num_elts))
 }
 
 /// Set initialization state of the slice, items of which are laid out according to the `layout` starting at address `ptr` to `value`.
 #[rustc_diagnostic_item = "KaniSetSlicePtrInitialized"]
 fn set_slice_ptr_initialized<const LAYOUT_SIZE: usize>(
     ptr: *const [()],
-    layout: Layout<LAYOUT_SIZE>,
-    value: bool,
-) {
-    let (ptr, num_elts) = ptr.to_raw_parts();
-    set_unit_ptr_initialized(ptr, layout, num_elts, value);
-}
-
-/// Get initialization state of the string slice, items of which are laid out according to the `layout` starting at address `ptr`.
-#[rustc_diagnostic_item = "KaniIsStrPtrInitialized"]
-fn is_str_ptr_initialized<const LAYOUT_SIZE: usize>(ptr: *const str, layout: Layout<LAYOUT_SIZE>) {
-    let (ptr, num_elts) = ptr.to_raw_parts();
-    is_unit_ptr_initialized(ptr, layout, num_elts)
-}
-
-/// Set initialization state of the string slice, items of which are laid out according to the `layout` starting at address `ptr` to `value`.
-#[rustc_diagnostic_item = "KaniSetStrPtrInitialized"]
-fn set_str_ptr_initialized<const LAYOUT_SIZE: usize>(
-    ptr: *const str,
     layout: Layout<LAYOUT_SIZE>,
     value: bool,
 ) {

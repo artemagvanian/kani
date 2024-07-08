@@ -534,7 +534,10 @@ impl<'a> MirVisitor for CheckUninitVisitor<'a> {
                 }
                 TerminatorKind::Drop { place, .. } => {
                     /* Check memory initialization of arguments */
-                    self.super_terminator(term, location);
+                    self.push_target(MemoryInitOp::CheckRef {
+                        operand: Operand::Copy(place.clone()),
+                        count: mk_const_operand(1, location.span()),
+                    });
 
                     // When drop is codegen'ed for types that could define their own dropping
                     // behavior, a reference is taken to the place which is later implicitly coerced
@@ -772,7 +775,7 @@ fn can_skip_intrinsic(intrinsic_name: &str) -> bool {
 }
 
 /// Create a constant operand with a given value and span.
-fn mk_const_operand(value: usize, span: Span) -> Operand {
+pub fn mk_const_operand(value: usize, span: Span) -> Operand {
     Operand::Constant(ConstOperand {
         span,
         user_ty: None,

@@ -54,6 +54,10 @@ impl MutableBody {
         &self.locals
     }
 
+    pub fn arg_count(&self) -> usize {
+        self.arg_count
+    }
+
     /// Create a mutable body from the original MIR body.
     pub fn from(body: Body) -> Self {
         MutableBody {
